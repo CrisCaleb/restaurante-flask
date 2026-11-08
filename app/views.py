@@ -2,8 +2,8 @@ from flask import g
 from flask_appbuilder  import BaseView, ModelView, expose
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from . import appbuilder
-from .models import (Categoria, Ingrediente, Plato, RecetaPlato,
-                     Mesa, Pedido, DetallePedido)
+from .extensions import db
+from .models import (Categoria, Ingrediente, Plato, RecetaPlato, Mesa, Pedido, DetallePedido)
 
 
 class CategoriaView(ModelView):
@@ -265,4 +265,159 @@ appbuilder.add_view(
     "Dashboard",
     icon = "fa-dashboard",
     category = "Menu principal"
+)
+
+from flask import render_template_string
+from sqlalchemy import func
+
+
+class ReporteStockBajoView(BaseView):
+    route_base = "/reporte-stock-bajo"
+    default_view = "index"
+
+    @expose("/")
+    def index(self):
+        # Consulta: Ingredientes donde la cantidad es menor o igual al stock mínimo
+        ingredientes_bajos = db.session.query(Ingrediente).filter(
+            Ingrediente.cantidad <= Ingrediente.stock_minimo,
+            Ingrediente.activo == True
+        ).all()
+        
+        html = """
+        <h2>Reporte: Ingredientes con Stock Bajo o Crítico</h2>
+        <table class="table table-bordered table-striped">
+            <thead>
+                <tr><th>Ingrediente</th><th>Categoría</th><th>Stock Actual</th><th>Stock Mínimo</th><th>Unidad</th></tr>
+            </thead>
+            <tbody>
+                {% for ing in ingredientes %}
+                <tr>
+                    <td>{{ ing.nombre }}</td>
+                    <td>{{ ing.categoria.nombre }}</td>
+                    <td class="text-danger"><strong>{{ ing.cantidad }}</strong></td>
+                    <td>{{ ing.stock_minimo }}</td>
+                    <td>{{ ing.unidad_medida }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="text-center">No hay ingredientes con stock bajo. ¡Excelente gestión!</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <a href="/" class="btn btn-primary">Volver al Inicio</a>
+        """
+        return render_template_string(html, ingredientes=ingredientes_bajos)
+
+
+class ReporteVentasPorFechaView(BaseView):
+    route_base = "/reporte-ventas"
+    default_view = "index"
+
+    @expose("/", methods=['GET', 'POST'])
+    def index(self):
+        from flask import request
+        fecha_inicio = request.form.get('fecha_inicio')
+        fecha_fin = request.form.get('fecha_fin')
+        
+        query = db.session.query(Pedido)
+        if fecha_inicio and fecha_fin:
+            query = query.filter(Pedido.fecha >= fecha_inicio, Pedido.fecha <= fecha_fin)
+        
+        pedidos = query.filter(Pedido.estado == 'cerrado').order_by(Pedido.fecha.desc()).all()
+        total_ventas = sum(p.total for p in pedidos)
+
+        html = """
+        <h2>Reporte: Ventas por Rango de Fechas</h2>
+        <form method="POST" class="form-inline mb-3">
+            <input type="date" name="fecha_inicio" class="form-control mr-2" required>
+            <input type="date" name="fecha_fin" class="form-control mr-2" required>
+            <button type="submit" class="btn btn-success">Filtrar</button>
+        </form>
+        <h4 class="text-primary">Total Vendido en el período: Bs {{ total_ventas }}</h4>
+        <table class="table table-bordered table-striped mt-3">
+            <thead>
+                <tr><th>ID Pedido</th><th>Fecha</th><th>Mesa</th><th>Atendido por</th><th>Total</th><th>Estado</th></tr>
+            </thead>
+            <tbody>
+                {% for p in pedidos %}
+                <tr>
+                    <td>{{ p.id }}</td>
+                    <td>{{ p.fecha.strftime('%d/%m/%Y %H:%M') }}</td>
+                    <td>{{ p.mesa.numero }}</td>
+                    <td>{{ p.usuario.first_name }} {{ p.usuario.last_name }}</td>
+                    <td>Bs {{ p.total }}</td>
+                    <td><span class="badge badge-success">{{ p.estado }}</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="text-center">No se encontraron ventas en ese rango.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <a href="/" class="btn btn-primary">Volver al Inicio</a>
+        """
+        return render_template_string(html, pedidos=pedidos, total_ventas=total_ventas)
+
+
+class ReportePlatosMasVendidosView(BaseView):
+    route_base = "/reporte-platos-vendidos"
+    default_view = "index"
+
+    @expose("/")
+    def index(self):
+        # Consulta: Agrupar por plato, sumar cantidades y ordenar descendente
+        resultados = db.session.query(
+            Plato.nombre,
+            func.sum(DetallePedido.cantidad).label('total_vendido')
+        ).join(
+            DetallePedido, Plato.id == DetallePedido.plato_id
+        ).group_by(
+            Plato.id, Plato.nombre
+        ).order_by(
+            func.sum(DetallePedido.cantidad).desc()
+        ).limit(10).all()
+
+        html = """
+        <h2>Reporte: Top 10 Platos Más Vendidos</h2>
+        <table class="table table-bordered table-striped">
+            <thead>
+                <tr><th>Posición</th><th>Plato</th><th>Cantidad Total Vendida</th></tr>
+            </thead>
+            <tbody>
+                {% for pos, (nombre, cantidad) in enumerate(resultados, start=1) %}
+                <tr>
+                    <td><strong>#{{ pos }}</strong></td>
+                    <td>{{ nombre }}</td>
+                    <td class="text-center"><span class="badge badge-info">{{ cantidad }} unidades</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" class="text-center">Aún no hay registros de ventas.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <a href="/" class="btn btn-primary">Volver al Inicio</a>
+        """
+        return render_template_string(html, resultados=resultados, enumerate=enumerate)
+
+
+# ==========================================
+# REGISTRO DE LAS VISTAS DE REPORTES EN EL MENÚ
+# ==========================================
+appbuilder.add_view(
+    ReporteStockBajoView,
+    "Stock Bajo",
+    icon="fa-exclamation-triangle",
+    category="Reportes"
+)
+
+appbuilder.add_view(
+    ReporteVentasPorFechaView,
+    "Ventas por Fecha",
+    icon="fa-calendar",
+    category="Reportes"
+)
+
+appbuilder.add_view(
+    ReportePlatosMasVendidosView,
+    "Platos Más Vendidos",
+    icon="fa-bar-chart",
+    category="Reportes"
 )
